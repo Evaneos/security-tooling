@@ -1,0 +1,140 @@
+name: 'Evaneos org wide trivy scan of container images'
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Docker image name to scan (without tag)'
+        required: true
+        type: string
+      image-tag:
+        description: 'Docker image tag to scan'
+        required: false
+        type: string
+        default: 'latest'
+
+    secrets:
+      composer-github-token:
+        description: 'GitHub token for Composer authentication'
+        required: false
+
+env:
+  TRIVY_DISABLE_VEX_NOTICE: true
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download centralized Trivy config and script
+        run: |
+          mkdir -p .github/workflows/security
+          # Download Trivy config
+          curl -o trivy.yaml \
+            https://raw.githubusercontent.com/Evaneos/security-tooling/main/trivy.yaml
+          # Download suggestions script
+          curl -o .github/workflows/security/trivy_suggested_updates.py \
+            https://raw.githubusercontent.com/Evaneos/security-tooling/main/trivy_suggested_updates.py
+          chmod +x .github/workflows/security/trivy_suggested_updates.py
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          load: true
+          tags: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          trivy-config: '.github/workflows/security/trivy.yaml'
+          image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+
+      - name: Generate Dockerfile suggestions
+        if: always()
+        run: |
+          if [ -f trivy-findings.json ]; then
+            python .github/workflows/security/trivy_suggested_updates.py trivy-findings.json
+            if [ -f dockerfile-suggestions.txt ]; then
+              echo "## 📝 Suggested Dockerfile Updates" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```dockerfile' >> $GITHUB_STEP_SUMMARY
+              cat dockerfile-suggestions.txt >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Add Trivy summary to run
+        if: always()
+        run: |
+          echo "## 🔍 Trivy Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ inputs.image-name }}:${{ inputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f trivy-findings.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-findings.json)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-findings.json)
+            MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-findings.json)
+            LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-findings.json)
+            TOTAL=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-findings.json)
+            
+            echo "**Total: $TOTAL** (🔴 CRITICAL: $CRITICAL, 🟠 HIGH: $HIGH, 🟡 MEDIUM: $MEDIUM, 🟢 LOW: $LOW)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $TOTAL -gt 0 ]; then
+              jq -r '
+                def severity_order:
+                  if . == "CRITICAL" then 0
+                  elif . == "HIGH" then 1
+                  elif . == "MEDIUM" then 2
+                  elif . == "LOW" then 3
+                  else 4
+                  end;
+                
+                .Results[]? |
+                if .Vulnerabilities and (.Vulnerabilities | length > 0) then
+                  .Target as $target |
+                  .Type as $type |
+                  
+                  "\n" + $target + " (" + $type + ")",
+                  "=" + ("=" * (($target + " (" + $type + ")") | length)),
+                  "",
+                  "| Package | Vulnerability | Severity | Installed Version | Fixed Version | Title |",
+                  "|---------|---------------|----------|-------------------|---------------|-------|",
+                  (
+                    .Vulnerabilities |
+                    sort_by(.Severity | severity_order) |
+                    .[] |
+                    "| " + .PkgName + " | " + .VulnerabilityID + " | " + .Severity + " | " + .InstalledVersion + " | " + (.FixedVersion // "") + " | " + ((.Title // .Description // "")[0:80]) + " |"
+                  )
+                else empty end
+              ' trivy-findings.json >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No vulnerabilities found!" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ No scan results found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Trivy results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-results-${{ inputs.image-name }}-${{ inputs.image-tag }}
+          path: |
+            trivy-findings.json

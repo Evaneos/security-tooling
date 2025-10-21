@@ -1,0 +1,7 @@
+cache: true
+format: json
+output: trivy-findings.json
+scanners: vuln
+severity: CRITICAL,HIGH,MEDIUM,LOW
+ignore-unfixed: true
+exit-code: 0
