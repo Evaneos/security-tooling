@@ -27,13 +27,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
-      - name: Checkout security-tooling repo
-        uses: actions/checkout@v4
-        with:
-          repository: Evaneos/security-tooling
-          path: security-tooling
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
