@@ -13,11 +13,6 @@ on:
         type: string
         default: 'latest'
 
-    secrets:
-      composer-github-token:
-        description: 'GitHub token for Composer authentication'
-        required: false
-
 env:
   TRIVY_DISABLE_VEX_NOTICE: true
 
@@ -43,6 +38,19 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Download centralized Trivy config and script
+        run: |
+          mkdir -p .github/workflows/security
+          # Download trivy configuration file
+          curl -f -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -o .github/workflows/security/trivy-config.yaml \
+            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy-config.yaml || exit 1
+          # Download trivy_suggested_updates script
+          curl -f -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -o .github/workflows/security/trivy_suggested_updates.py \
+            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy_suggested_updates.py || exit 1
+          echo "Downloaded files:"
+
       - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
@@ -56,11 +64,9 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          trivy-config: 'security-tooling/.github/workflows/security/trivy-config.yaml'
+          trivy-config: '.github/workflows/security/trivy-config.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
-          format: 'json'
-          output: 'trivy-findings.json'
-
+      
       - name: Generate Dockerfile suggestions
         if: always()
         run: |
