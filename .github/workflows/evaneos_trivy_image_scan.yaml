@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: 'latest'
+    secrets:
+      composer-github-token:
+        description: 'GitHub token for Composer authentication'
+        required: false
+
 
 env:
   TRIVY_DISABLE_VEX_NOTICE: true
