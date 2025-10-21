@@ -59,7 +59,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          trivy-config: '.github/workflows/security/trivy.yaml'
+          trivy-config: '.github/workflows/security/wazomba.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
 
       - name: Generate Dockerfile suggestions
