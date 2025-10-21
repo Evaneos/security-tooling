@@ -61,6 +61,8 @@ jobs:
         with:
           trivy-config: '.github/workflows/security/trivy-config.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+          format: 'json'
+          output: 'trivy-findings.json'
 
       - name: Generate Dockerfile suggestions
         if: always()
