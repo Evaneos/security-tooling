@@ -27,6 +27,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+      
+      - name: Checkout security-tooling repo
+        uses: actions/checkout@v4
+        with:
+          repository: Evaneos/security-tooling
+          path: security-tooling
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -35,16 +42,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Download centralized Trivy config and script
-        run: |
-          mkdir -p .github/workflows/security
-          # Download Trivy config
-          curl -o .github/workflows/security/trivy-config.yaml \
-            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy-config.yaml
-          # Download suggestions script
-          curl -o .github/workflows/security/trivy_suggested_updates.py \
-            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy_suggested_updates.py
 
       - name: Build Docker image
         uses: docker/build-push-action@v6
@@ -59,7 +56,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          trivy-config: '.github/workflows/security/trivy-config.yaml'
+          trivy-config: 'security-tooling/.github/workflows/security/trivy-config.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
           format: 'json'
           output: 'trivy-findings.json'
@@ -68,7 +65,7 @@ jobs:
         if: always()
         run: |
           if [ -f trivy-findings.json ]; then
-            python .github/workflows/security/trivy_suggested_updates.py trivy-findings.json
+            python security-tooling/.github/workflows/security/trivy_suggested_updates.py trivy-findings.json
             if [ -f dockerfile-suggestions.txt ]; then
               echo "## 📝 Suggested Dockerfile Updates" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY

@@ -23,7 +23,7 @@ def get_packages(data):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python trivy_suggested_updates.py <trivy-output.json>")
+        print("Usage: python script.py <trivy-output.json>")
         sys.exit(1)
     
     try:
