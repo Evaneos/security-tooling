@@ -40,8 +40,8 @@ jobs:
         run: |
           mkdir -p .github/workflows/security
           # Download Trivy config
-          curl -o .github/workflows/security/trivy.yaml \
-            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy.yaml
+          curl -o .github/workflows/security/trivy-config.yaml \
+            https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy-config.yaml
           # Download suggestions script
           curl -o .github/workflows/security/trivy_suggested_updates.py \
             https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy_suggested_updates.py
@@ -59,7 +59,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          trivy-config: '.github/workflows/security/wazomba.yaml'
+          trivy-config: '.github/workflows/security/trivy-config.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
 
       - name: Generate Dockerfile suggestions
