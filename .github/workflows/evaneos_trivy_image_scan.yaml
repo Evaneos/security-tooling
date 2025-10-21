@@ -21,6 +21,9 @@ on:
 env:
   TRIVY_DISABLE_VEX_NOTICE: true
 
+permissions:
+  contents: read
+
 jobs:
   security-scan:
     runs-on: ubuntu-latest
