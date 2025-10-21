@@ -40,7 +40,7 @@ jobs:
         run: |
           mkdir -p .github/workflows/security
           # Download Trivy config
-          curl -o trivy.yaml \
+          curl -o .github/workflows/security/trivy.yaml \
             https://raw.githubusercontent.com/Evaneos/security-tooling/main/.github/workflows/security/trivy.yaml
           # Download suggestions script
           curl -o .github/workflows/security/trivy_suggested_updates.py \
