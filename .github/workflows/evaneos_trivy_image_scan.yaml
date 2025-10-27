@@ -1,7 +1,7 @@
-name: 'Testing reusable action'
+name: 'Evaneos reusable trivy image scan workflow'
 
 on:
-  push:
+  workflow_call:
     inputs:
       image-name:
         description: 'Docker image name to scan (without tag)'
