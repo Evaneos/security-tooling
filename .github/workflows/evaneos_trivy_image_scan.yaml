@@ -17,16 +17,49 @@ on:
         required: false
         type: string
         default: 'registry'
+      push-image:
+        description: 'Whether to push the image to registry after scan (only works with scan-mode: build)'
+        required: false
+        type: boolean
+        default: false
+      build-target:
+        description: 'Docker build target (e.g., prod, dev)'
+        required: false
+        type: string
+        default: 'prod'
+      cache-from:
+        description: 'Cache source for Docker build'
+        required: false
+        type: string
+      cache-to:
+        description: 'Cache destination for Docker build'
+        required: false
+        type: string
+      require-approval-on-vulns:
+        description: 'Require manual approval if CRITICAL or HIGH vulnerabilities found before pushing'
+        required: false
+        type: boolean
+        default: false
     secrets:
       composer-github-token:
         description: 'GitHub token for Composer authentication'
         required: false
       docker-registry-username:
-        description: 'Docker registry username (required for scan-mode: registry)'
+        description: 'Docker registry username'
         required: false
       docker-registry-password:
-        description: 'Docker registry password (required for scan-mode: registry)'
+        description: 'Docker registry password'
         required: false
+    outputs:
+      critical-count:
+        description: 'Number of CRITICAL vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.critical }}
+      high-count:
+        description: 'Number of HIGH vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.high }}
+      scan-passed:
+        description: 'Whether scan completed without CRITICAL or HIGH vulnerabilities'
+        value: ${{ jobs.security-scan.outputs.scan-passed }}
 
 
 env:
@@ -38,6 +71,10 @@ permissions:
 jobs:
   security-scan:
     runs-on: ubuntu-latest
+    outputs:
+      critical: ${{ steps.count-vulns.outputs.critical }}
+      high: ${{ steps.count-vulns.outputs.high }}
+      scan-passed: ${{ steps.count-vulns.outputs.scan-passed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -58,14 +95,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build Docker image
+      - name: Build Docker image locally
         if: inputs.scan-mode == 'build'
         uses: docker/build-push-action@v6
         with:
+          target: ${{ inputs.build-target }}
           load: true
           tags: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: ${{ inputs.cache-from || 'type=gha' }}
+          cache-to: ${{ inputs.cache-to || 'type=gha,mode=max' }}
           secrets: |
             composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
 
@@ -101,6 +139,26 @@ jobs:
             fi
           fi
 
+      - name: Count vulnerabilities
+        id: count-vulns
+        if: always()
+        run: |
+          if [ -f trivy-findings.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-findings.json)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-findings.json)
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+            if [ "$CRITICAL" -eq 0 ] && [ "$HIGH" -eq 0 ]; then
+              echo "scan-passed=true" >> $GITHUB_OUTPUT
+            else
+              echo "scan-passed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "critical=0" >> $GITHUB_OUTPUT
+            echo "high=0" >> $GITHUB_OUTPUT
+            echo "scan-passed=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Add Trivy summary to run
         if: always()
         run: |
@@ -108,7 +166,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** \`${{ inputs.image-name }}:${{ inputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           if [ -f trivy-findings.json ]; then
             CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-findings.json)
             HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-findings.json)
@@ -168,3 +226,59 @@ jobs:
           name: ${{ steps.sanitize.outputs.artifact-name }}
           path: |
             trivy-findings.json
+
+      - name: Check if push should proceed
+        id: push-decision
+        if: inputs.scan-mode == 'build' && inputs.push-image
+        run: |
+          CRITICAL=${{ steps.count-vulns.outputs.critical }}
+          HIGH=${{ steps.count-vulns.outputs.high }}
+
+          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            if [ "${{ inputs.require-approval-on-vulns }}" == "true" ]; then
+              echo "should-wait=true" >> $GITHUB_OUTPUT
+              echo "⚠️ Found $CRITICAL CRITICAL and $HIGH HIGH vulnerabilities. Manual approval required." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "should-wait=false" >> $GITHUB_OUTPUT
+              echo "⚠️ Found $CRITICAL CRITICAL and $HIGH HIGH vulnerabilities. Pushing anyway (no approval required)." >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "should-wait=false" >> $GITHUB_OUTPUT
+            echo "✅ No CRITICAL or HIGH vulnerabilities found. Proceeding with push." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Wait for manual approval
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.push-decision.outputs.should-wait == 'true'
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: ${{ github.actor }}
+          minimum-approvals: 1
+          issue-title: "Security vulnerabilities found - Approve to push image"
+          issue-body: |
+            **Image:** ${{ inputs.image-name }}:${{ inputs.image-tag }}
+
+            **Vulnerabilities found:**
+            - 🔴 CRITICAL: ${{ steps.count-vulns.outputs.critical }}
+            - 🟠 HIGH: ${{ steps.count-vulns.outputs.high }}
+
+            Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and approve to push the image to the registry.
+
+      - name: Login to Docker registry for push
+        if: inputs.scan-mode == 'build' && inputs.push-image
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.docker-registry-username }}
+          password: ${{ secrets.docker-registry-password }}
+
+      - name: Push Docker image to registry
+        if: inputs.scan-mode == 'build' && inputs.push-image
+        uses: docker/build-push-action@v6
+        with:
+          target: ${{ inputs.build-target }}
+          tags: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+          push: true
+          cache-from: ${{ inputs.cache-from || 'type=gha' }}
+          cache-to: ${{ inputs.cache-to || 'type=gha,mode=max' }}
+          secrets: |
+            composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
