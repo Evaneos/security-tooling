@@ -1,7 +1,7 @@
-name: 'Evaneos org wide trivy scan of container images'
+name: 'Testing reusable action'
 
 on:
-  workflow_call:
+  push:
     inputs:
       image-name:
         description: 'Docker image name to scan (without tag)'
@@ -59,7 +59,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
         with:
-          trivy-config: '.github/workflows/security/trivy-config.yaml'
+          trivy-config: 'security-tooling/.github/workflows/security/trivy-config.yaml'
           image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
       
       - name: Generate Dockerfile suggestions
