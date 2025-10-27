@@ -12,9 +12,20 @@ on:
         required: false
         type: string
         default: 'latest'
+      scan-mode:
+        description: 'Scan mode: "build" to build image, "registry" to pull from registry'
+        required: false
+        type: string
+        default: 'registry'
     secrets:
       composer-github-token:
         description: 'GitHub token for Composer authentication'
+        required: false
+      docker-registry-username:
+        description: 'Docker registry username (required for scan-mode: registry)'
+        required: false
+      docker-registry-password:
+        description: 'Docker registry password (required for scan-mode: registry)'
         required: false
 
 
@@ -39,6 +50,7 @@ jobs:
           path: security-tooling
 
       - name: Set up Docker Buildx
+        if: inputs.scan-mode == 'build'
         uses: docker/setup-buildx-action@v3
 
       - name: Set up Python
@@ -47,6 +59,7 @@ jobs:
           python-version: '3.11'
 
       - name: Build Docker image
+        if: inputs.scan-mode == 'build'
         uses: docker/build-push-action@v6
         with:
           load: true
@@ -55,6 +68,17 @@ jobs:
           cache-to: type=gha,mode=max
           secrets: |
             composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
+
+      - name: Login to Docker registry
+        if: inputs.scan-mode == 'registry'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.docker-registry-username }}
+          password: ${{ secrets.docker-registry-password }}
+
+      - name: Pull Docker image from registry
+        if: inputs.scan-mode == 'registry'
+        run: docker pull ${{ inputs.image-name }}:${{ inputs.image-tag }}
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@0.33.1
