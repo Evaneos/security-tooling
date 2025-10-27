@@ -130,10 +130,17 @@ jobs:
             echo "❌ No scan results found" >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Sanitize image name for artifact
+        if: always()
+        id: sanitize
+        run: |
+          SANITIZED_NAME=$(echo "${{ inputs.image-name }}" | tr '/' '-')
+          echo "artifact-name=trivy-results-${SANITIZED_NAME}-${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+
       - name: Upload Trivy results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-results-${{ replace(inputs.image-name, '/', '-') }}-${{ inputs.image-tag }}
+          name: ${{ steps.sanitize.outputs.artifact-name }}
           path: |
             trivy-findings.json
