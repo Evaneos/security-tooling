@@ -67,6 +67,7 @@ env:
 
 permissions:
   contents: read
+# Required so we can create an issue if vulns are found in the image
   issues: write
 
 jobs:
@@ -235,52 +236,113 @@ jobs:
           path: |
             trivy-findings.json
 
-      - name: Check if push should proceed
-        id: push-decision
+      - name: Check vulnerabilities and handle approval
+        id: vuln-check
         if: inputs.scan-mode == 'build' && inputs.push-image
         run: |
           CRITICAL=${{ steps.count-vulns.outputs.critical }}
           HIGH=${{ steps.count-vulns.outputs.high }}
 
           if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+            echo "has-vulns=true" >> $GITHUB_OUTPUT
             if [ "${{ inputs.require-approval-on-vulns }}" == "true" ]; then
-              echo "should-wait=true" >> $GITHUB_OUTPUT
-              echo "⚠️ Found $CRITICAL CRITICAL and $HIGH HIGH vulnerabilities. Manual approval required." >> $GITHUB_STEP_SUMMARY
+              echo "should-push=false" >> $GITHUB_OUTPUT
+              echo "⚠️ Found $CRITICAL CRITICAL and $HIGH HIGH vulnerabilities. Creating issue for tracking." >> $GITHUB_STEP_SUMMARY
             else
-              echo "should-wait=false" >> $GITHUB_OUTPUT
+              echo "should-push=true" >> $GITHUB_OUTPUT
               echo "⚠️ Found $CRITICAL CRITICAL and $HIGH HIGH vulnerabilities. Pushing anyway (no approval required)." >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "should-wait=false" >> $GITHUB_OUTPUT
+            echo "has-vulns=false" >> $GITHUB_OUTPUT
+            echo "should-push=true" >> $GITHUB_OUTPUT
             echo "✅ No CRITICAL or HIGH vulnerabilities found. Proceeding with push." >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Wait for manual approval
-        if: inputs.scan-mode == 'build' && inputs.push-image && steps.push-decision.outputs.should-wait == 'true'
-        uses: trstringer/manual-approval@v1
+      - name: Create issue for vulnerabilities
+        if: inputs.scan-mode == 'build' && inputs.push-image && inputs.require-approval-on-vulns && steps.vuln-check.outputs.has-vulns == 'true'
+        uses: actions/github-script@v7
         with:
-          secret: ${{ github.TOKEN }}
-          approvers: ${{ github.actor }}
-          minimum-approvals: 1
-          issue-title: "Security vulnerabilities found - Approve to push image"
-          issue-body: |
-            **Image:** ${{ inputs.image-name }}:${{ inputs.image-tag }}
-
-            **Vulnerabilities found:**
-            - 🔴 CRITICAL: ${{ steps.count-vulns.outputs.critical }}
-            - 🟠 HIGH: ${{ steps.count-vulns.outputs.high }}
-
-            Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) and approve to push the image to the registry.
+          script: |
+            const critical = ${{ steps.count-vulns.outputs.critical }};
+            const high = ${{ steps.count-vulns.outputs.high }};
+            const imageName = '${{ inputs.image-name }}';
+            const imageTag = '${{ inputs.image-tag }}';
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            
+            // Check if issue already exists for this image
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['security', 'trivy-scan'],
+            });
+            
+            const issueTitle = `Security vulnerabilities found in ${imageName}:${imageTag}`;
+            const existingIssue = existingIssues.data.find(issue => issue.title === issueTitle);
+            
+            const issueBody = `## 🔍 Trivy Security Scan Results
+            
+            **Image:** \`${imageName}:${imageTag}\`
+            **Workflow Run:** [View Details](${runUrl})
+            **Date:** ${new Date().toISOString()}
+            
+            ### Vulnerability Summary
+            
+            - 🔴 **CRITICAL:** ${critical}
+            - 🟠 **HIGH:** ${high}
+            
+            ### Actions Required
+            
+            1. Review the [detailed scan results](${runUrl}) in the workflow run
+            2. Update dependencies or apply security patches
+            3. Re-run the build workflow after fixes
+            
+            ### Detailed Results
+            
+            See the workflow artifacts for the complete Trivy scan report.
+            
+            ---
+            
+            **Note:** This image was **not pushed** to the registry due to security vulnerabilities.
+            
+            To push this image anyway (not recommended):
+            - Re-run the workflow with \`require-approval-on-vulns: false\`
+            `;
+            
+            if (existingIssue) {
+              // Update existing issue with new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `### New scan results (${new Date().toISOString()})
+                
+                ${issueBody}`
+              });
+              
+              core.summary.addRaw(`📝 Updated existing issue: #${existingIssue.number}`, true);
+            } else {
+              // Create new issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['security', 'trivy-scan', 'vulnerability']
+              });
+              
+              core.summary.addRaw(`📝 Created issue: #${issue.data.number}`, true);
+            }
 
       - name: Login to Docker registry for push
-        if: inputs.scan-mode == 'build' && inputs.push-image
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.docker-registry-username }}
           password: ${{ secrets.docker-registry-password }}
 
       - name: Push Docker image to registry
-        if: inputs.scan-mode == 'build' && inputs.push-image
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
         uses: docker/build-push-action@v6
         with:
           target: ${{ inputs.build-target }}
@@ -290,3 +352,11 @@ jobs:
           cache-to: ${{ inputs.cache-to || 'type=gha,mode=max' }}
           secrets: |
             composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
+      
+      - name: Push skipped due to vulnerabilities
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'false'
+        run: |
+          echo "## 🚫 Image Not Pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The Docker image was not pushed to the registry due to security vulnerabilities." >> $GITHUB_STEP_SUMMARY
+          echo "An issue has been created to track the vulnerabilities." >> $GITHUB_STEP_SUMMARY
