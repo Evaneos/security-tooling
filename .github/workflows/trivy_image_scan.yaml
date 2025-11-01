@@ -1,0 +1,436 @@
+name: 'Evaneos reusable trivy image scan workflow'
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Docker image name to scan (without tag)'
+        required: true
+        type: string
+      image-tag:
+        description: 'Docker image tag to scan'
+        required: false
+        type: string
+        default: 'latest'        
+      # registry mode, when pulling a pre built image from a remote registry
+      # is kept as an avatar of previous tests but most of the workflow uses build
+      scan-mode:
+        description: 'Scan mode: "build" to build image, "registry" to pull from registry'
+        required: false
+        type: string
+        default: 'build'
+      push-image:
+        description: 'Whether to push the image to registry after scan (only works with scan-mode: build)'
+        required: false
+        type: boolean
+        default: false
+      build-target:
+        description: 'Docker build target (e.g., prod, dev)'
+        required: false
+        type: string
+        default: 'prod'
+      cache-from:
+        description: 'Cache source for Docker build'
+        required: false
+        type: string
+      cache-to:
+        description: 'Cache destination for Docker build'
+        required: false
+        type: string
+      push-with-vulns:
+        description: 'Push scanned image to the registry even it contains vulnerabilities'
+        required: false
+        type: boolean
+        default: false
+      create-issue-on-vulns:
+        description: 'Create a GitHub issue when vulnerabilities are found'
+        required: false
+        type: boolean
+        default: false  
+    secrets:
+      composer-github-token:
+        description: 'GitHub token for Composer authentication'
+        required: false
+      docker-registry-username:
+        description: 'Docker registry username'
+        required: false
+      docker-registry-password:
+        description: 'Docker registry password'
+        required: false
+    outputs:
+      critical-count:
+        description: 'Number of CRITICAL vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.critical }}
+      high-count:
+        description: 'Number of HIGH vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.high }}
+      medium-count:
+        description: 'Number of MEDIUM vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.medium }}
+      low-count:
+        description: 'Number of LOW vulnerabilities found'
+        value: ${{ jobs.security-scan.outputs.low }}  
+      scan-passed:
+        description: 'Whether scan completed without any vulnerability'
+        value: ${{ jobs.security-scan.outputs.scan-passed }}
+
+
+env:
+  TRIVY_DISABLE_VEX_NOTICE: true
+
+permissions:
+  contents: read
+# Required so we can create an issue if vulns are found in the image
+  issues: write
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    outputs:
+      critical: ${{ steps.count-vulns.outputs.critical }}
+      high: ${{ steps.count-vulns.outputs.high }}
+      medium: ${{ steps.count-vulns.outputs.medium }}
+      low: ${{ steps.count-vulns.outputs.low }}
+      scan-passed: ${{ steps.count-vulns.outputs.scan-passed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      # We checkout the entire security-tooling repo because we'll need some files in it
+      # trivy.yaml conf file and the python script parsing findings     
+      - name: Checkout security-tooling repo
+        uses: actions/checkout@v4
+        with:
+          repository: Evaneos/security-tooling
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: security-tooling
+
+      - name: Set up Docker Buildx
+        if: inputs.scan-mode == 'build'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Login to Docker registry for build cache
+        if: inputs.scan-mode == 'build' && inputs.cache-from && contains(inputs.cache-from, 'type=registry')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.docker-registry-username }}
+          password: ${{ secrets.docker-registry-password }}
+
+      - name: Build Docker image locally
+        if: inputs.scan-mode == 'build'
+        uses: docker/build-push-action@v6
+        with:
+          target: ${{ inputs.build-target }}
+          load: true
+          tags: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+          cache-from: ${{ inputs.cache-from || 'type=gha' }}
+          cache-to: ${{ inputs.cache-to || 'type=gha,mode=max' }}
+          secrets: |
+            composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
+
+      - name: Login to Docker registry
+        if: inputs.scan-mode == 'registry'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.docker-registry-username }}
+          password: ${{ secrets.docker-registry-password }}
+
+      - name: Pull Docker image from registry
+        if: inputs.scan-mode == 'registry'
+        run: docker pull ${{ inputs.image-name }}:${{ inputs.image-tag }}
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          trivy-config: 'security-tooling/.github/workflows/security/trivy-config.yaml'
+          image-ref: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+      
+      - name: Generate Dockerfile suggestions
+        if: always()
+        run: |
+          if [ -f trivy-findings.json ]; then
+            python security-tooling/.github/workflows/security/trivy_suggested_updates.py trivy-findings.json
+            if [ -f dockerfile-suggestions.txt ]; then
+              echo "## 📝 Suggested Dockerfile Updates" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```dockerfile' >> $GITHUB_STEP_SUMMARY
+              cat dockerfile-suggestions.txt >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Count vulnerabilities
+        id: count-vulns
+        if: always()
+        run: |
+          if [ -f trivy-findings.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-findings.json)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-findings.json)
+            MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-findings.json)
+            LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-findings.json)
+            TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+            
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+            echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+            echo "low=$LOW" >> $GITHUB_OUTPUT
+            
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "scan-passed=true" >> $GITHUB_OUTPUT
+            else
+              echo "scan-passed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "critical=0" >> $GITHUB_OUTPUT
+            echo "high=0" >> $GITHUB_OUTPUT
+            echo "medium=0" >> $GITHUB_OUTPUT
+            echo "low=0" >> $GITHUB_OUTPUT
+            echo "scan-passed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Add Trivy summary to run
+        if: always()
+        run: |
+          echo "## 🔍 Trivy Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ inputs.image-name }}:${{ inputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f trivy-findings.json ]; then
+            CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-findings.json)
+            HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-findings.json)
+            MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' trivy-findings.json)
+            LOW=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' trivy-findings.json)
+            TOTAL=$(jq '[.Results[]?.Vulnerabilities[]?] | length' trivy-findings.json)
+            
+            echo "**Total: $TOTAL** (🔴 CRITICAL: $CRITICAL, 🟠 HIGH: $HIGH, 🟡 MEDIUM: $MEDIUM, 🟢 LOW: $LOW)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            
+            if [ $TOTAL -gt 0 ]; then
+              jq -r '
+                def severity_order:
+                  if . == "CRITICAL" then 0
+                  elif . == "HIGH" then 1
+                  elif . == "MEDIUM" then 2
+                  elif . == "LOW" then 3
+                  else 4
+                  end;
+                
+                .Results[]? |
+                if .Vulnerabilities and (.Vulnerabilities | length > 0) then
+                  .Target as $target |
+                  .Type as $type |
+                  
+                  "\n" + $target + " (" + $type + ")",
+                  "=" + ("=" * (($target + " (" + $type + ")") | length)),
+                  "",
+                  "| Package | Vulnerability | Severity | Installed Version | Fixed Version | Title |",
+                  "|---------|---------------|----------|-------------------|---------------|-------|",
+                  (
+                    .Vulnerabilities |
+                    sort_by(.Severity | severity_order) |
+                    .[] |
+                    "| " + .PkgName + " | " + .VulnerabilityID + " | " + .Severity + " | " + .InstalledVersion + " | " + (.FixedVersion // "") + " | " + ((.Title // .Description // "")[0:80]) + " |"
+                  )
+                else empty end
+              ' trivy-findings.json >> $GITHUB_STEP_SUMMARY
+            else
+              echo "✅ No vulnerabilities found!" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "❌ No scan results found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Sanitize image name for artifact
+        if: always()
+        id: sanitize
+        run: |
+          SANITIZED_NAME=$(echo "${{ inputs.image-name }}" | tr '/' '-')
+          echo "artifact-name=trivy-results-${SANITIZED_NAME}-${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+
+      - name: Upload Trivy results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.sanitize.outputs.artifact-name }}
+          path: |
+            trivy-findings.json
+
+      - name: Check vulnerabilities and determine actions
+        id: vuln-check
+        if: always()
+        run: |
+          CRITICAL=${{ steps.count-vulns.outputs.critical }}
+          HIGH=${{ steps.count-vulns.outputs.high }}
+          MEDIUM=${{ steps.count-vulns.outputs.medium }}
+          LOW=${{ steps.count-vulns.outputs.low }}
+          TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW))
+
+          if [ "$TOTAL" -gt 0 ]; then
+            echo "has-vulns=true" >> $GITHUB_OUTPUT
+            
+            # build mode with push requested
+            if [ "${{ inputs.scan-mode }}" == "build" ] && [ "${{ inputs.push-image }}" == "true" ]; then
+              if [ "${{ inputs.push-with-vulns }}" == "false" ]; then
+                echo "should-push=false" >> $GITHUB_OUTPUT
+                echo "should-create-issue=true" >> $GITHUB_OUTPUT
+                echo "⚠️ Found $TOTAL vulnerabilities ($CRITICAL CRITICAL, $HIGH HIGH, $MEDIUM MEDIUM, $LOW LOW). Creating issue for tracking." >> $GITHUB_STEP_SUMMARY
+              else
+                echo "should-push=true" >> $GITHUB_OUTPUT
+                echo "should-create-issue=false" >> $GITHUB_OUTPUT
+                echo "⚠️ Found $TOTAL vulnerabilities ($CRITICAL CRITICAL, $HIGH HIGH, $MEDIUM MEDIUM, $LOW LOW). Pushing anyway (no approval required)." >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+
+              # registry mode or build mode without push
+              echo "should-push=false" >> $GITHUB_OUTPUT
+              if [ "${{ inputs.create-issue-on-vulns }}" == "true" ]; then
+                echo "should-create-issue=true" >> $GITHUB_OUTPUT
+                echo "⚠️ Found $TOTAL vulnerabilities ($CRITICAL CRITICAL, $HIGH HIGH, $MEDIUM MEDIUM, $LOW LOW). Creating issue for tracking." >> $GITHUB_STEP_SUMMARY
+              else
+                echo "should-create-issue=false" >> $GITHUB_OUTPUT
+                echo "⚠️ Found $TOTAL vulnerabilities ($CRITICAL CRITICAL, $HIGH HIGH, $MEDIUM MEDIUM, $LOW LOW)." >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+          else
+            echo "has-vulns=false" >> $GITHUB_OUTPUT
+            echo "should-push=true" >> $GITHUB_OUTPUT
+            echo "should-create-issue=false" >> $GITHUB_OUTPUT
+            echo "✅ No vulnerabilities found." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create issue for vulnerabilities
+        if: steps.vuln-check.outputs.should-create-issue == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const critical = ${{ steps.count-vulns.outputs.critical }};
+            const high = ${{ steps.count-vulns.outputs.high }};
+            const medium = ${{ steps.count-vulns.outputs.medium }};
+            const low = ${{ steps.count-vulns.outputs.low }};
+            const imageName = '${{ inputs.image-name }}';
+            const imageTag = '${{ inputs.image-tag }}';
+            const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
+            const scanMode = '${{ inputs.scan-mode }}';
+            const pushImage = '${{ inputs.push-image }}';
+            
+            // Check if issue already exists for this image
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['security', 'trivy-scan'],
+            });
+            
+            const issueTitle = `Security vulnerabilities found in ${imageName}:${imageTag}`;
+            const existingIssue = existingIssues.data.find(issue => issue.title === issueTitle);
+            
+            // Determine note and action sections based on scan mode
+            let noteSection = '';
+            let actionSection = '';
+            
+            if (scanMode === 'build' && pushImage === 'true') {
+              noteSection = '**Note:** This image was **not pushed** to the registry due to security vulnerabilities.';
+              actionSection = `To push this image anyway (not recommended):
+            - Re-run the workflow with \`require_approval: false\`
+            - Alternatively, you can set \`push-with-vulns: true\``;
+            } else if (scanMode === 'registry') {
+              noteSection = '**Note:** This image is currently **in the registry** with known vulnerabilities.';
+              actionSection = `To remediate:
+            1. Update dependencies or apply security patches in your Dockerfile/dependencies
+            2. Rebuild and push a new version of the image
+            3. Consider removing this vulnerable image version if it is actively deployed`;
+            } else {
+              noteSection = '**Note:** This image was scanned but not pushed.';
+              actionSection = `To remediate:
+            1. Update dependencies or apply security patches
+            2. Rebuild the image`;
+            }
+            
+            const issueBody = `## 🔍 Trivy Security Scan Results
+            
+            **Image:** \`${imageName}:${imageTag}\`
+            **Scan Mode:** ${scanMode}
+            **Workflow Run:** [View Details](${runUrl})
+            **Date:** ${new Date().toISOString()}
+            
+            ### Vulnerability Summary
+            
+            - 🔴 **CRITICAL:** ${critical}
+            - 🟠 **HIGH:** ${high}
+            - 🟡 **MEDIUM**: ${medium}
+            - 🟢 **LOW**: ${low}
+            
+            ### Actions Required
+            
+            1. Review the [detailed scan results](${runUrl}) in the workflow run
+            2. Update dependencies or apply security patches
+            3. Re-run the build workflow after fixes
+            
+            ### Detailed Results
+            
+            See the workflow artifacts for the complete Trivy scan report.
+            
+            ---
+            
+            ${noteSection}
+            
+            ${actionSection}
+            `;
+            
+            if (existingIssue) {
+              // Update existing issue with new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `### New scan results (${new Date().toISOString()})
+                
+                ${issueBody}`
+              });
+              
+              core.summary.addRaw(`📝 Updated existing issue: #${existingIssue.number}`, true);
+            } else {
+              // Create new issue
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['security', 'trivy']
+              });
+              
+              core.summary.addRaw(`📝 Created issue: #${issue.data.number}`, true);
+            }
+
+      - name: Login to Docker registry for push
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.docker-registry-username }}
+          password: ${{ secrets.docker-registry-password }}
+
+      - name: Push Docker image to registry
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          target: ${{ inputs.build-target }}
+          tags: '${{ inputs.image-name }}:${{ inputs.image-tag }}'
+          push: true
+          cache-from: ${{ inputs.cache-from || 'type=gha' }}
+          cache-to: ${{ inputs.cache-to || 'type=gha,mode=max' }}
+          secrets: |
+            composer_auth={"github-oauth": {"github.com": "${{ secrets.composer-github-token || secrets.GITHUB_TOKEN }}"}}
+      
+      - name: Push skipped due to vulnerabilities
+        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'false'
+        run: |
+          echo "## 🚫 Image was **not** pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The Docker image was not pushed to the registry due to security vulnerabilities." >> $GITHUB_STEP_SUMMARY
+          echo "An issue has been created to track the vulnerabilities." >> $GITHUB_STEP_SUMMARY
