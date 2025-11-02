@@ -26,9 +26,8 @@ on:
         default: false
       build-target:
         description: 'Docker build target (e.g., prod, dev)'
-        required: false
+        required: true
         type: string
-        default: 'prod'
       cache-from:
         description: 'Cache source for Docker build'
         required: false
@@ -38,7 +37,7 @@ on:
         required: false
         type: string
       push-with-vulns:
-        description: 'Push scanned image to the registry even it contains vulnerabilities'
+        description: 'Push scanned image to the registry even if it contains vulnerabilities'
         required: false
         type: boolean
         default: false
@@ -113,14 +112,14 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Login to Docker registry for build cache
-        if: inputs.scan-mode == 'build' && inputs.cache-from && contains(inputs.cache-from, 'type=registry')
+      - name: Login to Docker registry
+        if: inputs.scan-mode == 'build'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.docker-registry-username }}
           password: ${{ secrets.docker-registry-password }}
 
-      - name: Build Docker image locally
+      - name: Build Docker image
         if: inputs.scan-mode == 'build'
         uses: docker/build-push-action@v6
         with:
@@ -407,13 +406,6 @@ jobs:
               
               core.summary.addRaw(`📝 Created issue: #${issue.data.number}`, true);
             }
-
-      - name: Login to Docker registry for push
-        if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.docker-registry-username }}
-          password: ${{ secrets.docker-registry-password }}
 
       - name: Push Docker image to registry
         if: inputs.scan-mode == 'build' && inputs.push-image && steps.vuln-check.outputs.should-push == 'true'
