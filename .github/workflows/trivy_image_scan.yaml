@@ -323,6 +323,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
             const critical = ${{ steps.count-vulns.outputs.critical }};
             const high = ${{ steps.count-vulns.outputs.high }};
             const medium = ${{ steps.count-vulns.outputs.medium }};
@@ -333,7 +334,16 @@ jobs:
             const scanMode = '${{ inputs.scan-mode }}';
             const pushImage = '${{ inputs.push-image }}';
             const hasSuggestions = '${{ steps.read-suggestions.outputs.has-suggestions }}' === 'true';
-            const suggestions = `${{ steps.read-suggestions.outputs.suggestions }}`;
+
+            // Read suggestions file directly to preserve formatting
+            let suggestions = '';
+            if (hasSuggestions) {
+              try {
+                suggestions = fs.readFileSync('dockerfile-suggestions.txt', 'utf8');
+              } catch (error) {
+                console.log('Could not read dockerfile-suggestions.txt:', error);
+              }
+            }
 
             // Check if issue already exists for this image
             const existingIssues = await github.rest.issues.listForRepo({
@@ -370,7 +380,7 @@ jobs:
 
             // Add Dockerfile suggestions section if available
             let suggestionsSection = '';
-            if (hasSuggestions) {
+            if (hasSuggestions && suggestions) {
               suggestionsSection = `
             ### 📝 Suggested Dockerfile Updates
 
