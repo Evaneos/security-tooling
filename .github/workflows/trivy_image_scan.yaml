@@ -303,6 +303,21 @@ jobs:
             echo "✅ No vulnerabilities found." >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Read Dockerfile suggestions
+        id: read-suggestions
+        if: steps.vuln-check.outputs.should-create-issue == 'true'
+        run: |
+          if [ -f dockerfile-suggestions.txt ]; then
+            echo "has-suggestions=true" >> $GITHUB_OUTPUT
+            # Read suggestions and escape for GitHub Actions
+            SUGGESTIONS=$(cat dockerfile-suggestions.txt)
+            echo "suggestions<<EOF" >> $GITHUB_OUTPUT
+            echo "$SUGGESTIONS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "has-suggestions=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create issue for vulnerabilities
         if: steps.vuln-check.outputs.should-create-issue == 'true'
         uses: actions/github-script@v7
@@ -317,7 +332,9 @@ jobs:
             const runUrl = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}';
             const scanMode = '${{ inputs.scan-mode }}';
             const pushImage = '${{ inputs.push-image }}';
-            
+            const hasSuggestions = '${{ steps.read-suggestions.outputs.has-suggestions }}' === 'true';
+            const suggestions = `${{ steps.read-suggestions.outputs.suggestions }}`;
+
             // Check if issue already exists for this image
             const existingIssues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -325,14 +342,14 @@ jobs:
               state: 'open',
               labels: ['security', 'trivy-scan'],
             });
-            
+
             const issueTitle = `Security vulnerabilities found in ${imageName}:${imageTag}`;
             const existingIssue = existingIssues.data.find(issue => issue.title === issueTitle);
-            
+
             // Determine note and action sections based on scan mode
             let noteSection = '';
             let actionSection = '';
-            
+
             if (scanMode === 'build' && pushImage === 'true') {
               noteSection = '**Note:** This image was **not pushed** to the registry due to security vulnerabilities.';
               actionSection = `To push this image anyway (not recommended):
@@ -350,38 +367,50 @@ jobs:
             1. Update dependencies or apply security patches
             2. Rebuild the image`;
             }
-            
+
+            // Add Dockerfile suggestions section if available
+            let suggestionsSection = '';
+            if (hasSuggestions) {
+              suggestionsSection = `
+            ### 📝 Suggested Dockerfile Updates
+
+            \`\`\`dockerfile
+            ${suggestions}
+            \`\`\`
+            `;
+            }
+
             const issueBody = `## 🔍 Trivy Security Scan Results
-            
+
             **Image:** \`${imageName}:${imageTag}\`
             **Scan Mode:** ${scanMode}
             **Workflow Run:** [View Details](${runUrl})
             **Date:** ${new Date().toISOString()}
-            
+
             ### Vulnerability Summary
-            
+
             - 🔴 **CRITICAL:** ${critical}
             - 🟠 **HIGH:** ${high}
             - 🟡 **MEDIUM**: ${medium}
             - 🟢 **LOW**: ${low}
-            
+            ${suggestionsSection}
             ### Actions Required
-            
+
             1. Review the [detailed scan results](${runUrl}) in the workflow run
             2. Update dependencies or apply security patches
             3. Re-run the build workflow after fixes
-            
+
             ### Detailed Results
-            
+
             See the workflow artifacts for the complete Trivy scan report.
-            
+
             ---
-            
+
             ${noteSection}
-            
+
             ${actionSection}
             `;
-            
+
             if (existingIssue) {
               // Update existing issue with new comment
               await github.rest.issues.createComment({
@@ -389,10 +418,10 @@ jobs:
                 repo: context.repo.repo,
                 issue_number: existingIssue.number,
                 body: `### New scan results (${new Date().toISOString()})
-                
+
                 ${issueBody}`
               });
-              
+
               core.summary.addRaw(`📝 Updated existing issue: #${existingIssue.number}`, true);
             } else {
               // Create new issue
@@ -403,7 +432,7 @@ jobs:
                 body: issueBody,
                 labels: ['security', 'trivy']
               });
-              
+
               core.summary.addRaw(`📝 Created issue: #${issue.data.number}`, true);
             }
 
