@@ -15,7 +15,7 @@ on:
       # registry mode, when pulling a pre built image from a remote registry
       # is kept as an avatar of previous tests but most of the workflow uses build
       scan-mode:
-        description: 'Scan mode: "build" to build image, "registry" to pull from registry'
+        description: 'scan-mode: "build" to build image, "registry" to pull from registry'
         required: false
         type: string
         default: 'build'
@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       build-target:
-        description: 'Docker build target (e.g., prod, dev)'
+        description: 'Docker build target (test, prod, dev, release)'
         required: true
         type: string
       cache-from:
@@ -273,12 +273,14 @@ jobs:
           if [ "$TOTAL" -gt 0 ]; then
             echo "has-vulns=true" >> $GITHUB_OUTPUT
             
-            # build mode with push requested
+            # build mode AND attempting to push
+            # 
             if [ "${{ inputs.scan-mode }}" == "build" ] && [ "${{ inputs.push-image }}" == "true" ]; then
               if [ "${{ inputs.push-with-vulns }}" == "false" ]; then
                 echo "should-push=false" >> $GITHUB_OUTPUT
                 echo "should-create-issue=true" >> $GITHUB_OUTPUT
                 echo "⚠️ Found $TOTAL vulnerabilities ($CRITICAL CRITICAL, $HIGH HIGH, $MEDIUM MEDIUM, $LOW LOW). Creating issue for tracking." >> $GITHUB_STEP_SUMMARY
+            # push-with-vulns != false  
               else
                 echo "should-push=true" >> $GITHUB_OUTPUT
                 echo "should-create-issue=false" >> $GITHUB_OUTPUT
@@ -286,7 +288,7 @@ jobs:
               fi
             else
 
-              # registry mode or build mode without push
+              # registry mode OR build mode without attempting to push
               echo "should-push=false" >> $GITHUB_OUTPUT
               if [ "${{ inputs.create-issue-on-vulns }}" == "true" ]; then
                 echo "should-create-issue=true" >> $GITHUB_OUTPUT
@@ -363,8 +365,7 @@ jobs:
             if (scanMode === 'build' && pushImage === 'true') {
               noteSection = '**Note:** This image was **not pushed** to the registry due to security vulnerabilities.';
               actionSection = `To push this image anyway (not recommended):
-            - Re-run the workflow with \`require_approval: false\`
-            - Alternatively, you can set \`push-with-vulns: true\``;
+            - Re-run the workflow with \`push_with_vulns: true\``;
             } else if (scanMode === 'registry') {
               noteSection = '**Note:** This image is currently **in the registry** with known vulnerabilities.';
               actionSection = `To remediate:
